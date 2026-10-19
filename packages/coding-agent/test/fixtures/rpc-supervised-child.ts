@@ -6,6 +6,7 @@
  * runtime. argv: <serverVersion> <capabilities> <behavior: answer|silent> ... --listen unix://<path>
  */
 import { createServer } from "node:net";
+import { hostChildDrainRequestFile, watchDrainRequest } from "../../src/modes/rpc/host-drain-request.ts";
 import { HOST_GENERATION_ENV, HOST_INSTANCE_ID_ENV } from "../../src/modes/rpc/host-identity-env.ts";
 import { armHostWatchdog, readHostWatchdogConfigFromBrandEnv } from "../../src/modes/rpc/host-watchdog.ts";
 import { LoopLagWatchdog } from "../../src/modes/rpc/loop-lag-watchdog.ts";
@@ -46,5 +47,8 @@ const loopLag = new LoopLagWatchdog({ emit: () => {}, log: () => {} });
 loopLag.start();
 armHostWatchdog(readHostWatchdogConfigFromBrandEnv(), () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));
-// A drain request ends no work here: the fixture has none.
+// A drain SIGNAL is ignored, so a suite can tell which channel reached the host: the fixture has no
+// sessions to park, and leaves at once only when its supervisor's signal-free relay asks (#3653).
 process.on("SIGUSR1", () => {});
+const drainRequestFile = hostChildDrainRequestFile();
+if (drainRequestFile !== undefined) watchDrainRequest(drainRequestFile, () => process.exit(0), { pollMs: 100 });

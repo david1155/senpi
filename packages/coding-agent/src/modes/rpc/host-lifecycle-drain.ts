@@ -6,8 +6,11 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { processIsLive, readProcessStartTime } from "../../utils/process-identity.ts";
+import type { HostStopSender } from "./host-crash-record.ts";
+import type { HostGenerationPaths } from "./host-daemon-paths.ts";
+import { watchDrainRequest, writeDrainRequest, writeDrainWatch } from "./host-drain-request.ts";
 import { DEFAULT_HANDOFF_GRACE_MS, HANDOFF_GRACE_MS_ENV, parseIdleExitMs } from "./host-lifecycle-policy.ts";
-import { watchForSupersession } from "./host-supersession.ts";
+import { type SupersessionPointer, watchForSupersession } from "./host-supersession.ts";
 import { errorMessage, supervisorLog } from "./host-supervisor-log.ts";
 import type { SocketFileIdentity } from "./socket-ownership.ts";
 
@@ -17,11 +20,22 @@ export class SupervisorDrain {
 	private readonly child: ChildProcess;
 	private readonly shuttingDown: () => boolean;
 	private readonly beginStopping: () => void;
+	private readonly relay: { readonly file: string; readonly sender: HostStopSender } | undefined;
 
-	constructor(child: ChildProcess, shuttingDown: () => boolean, beginStopping: () => void = () => {}) {
+	/**
+	 * `relay` is the child's drain-request file (host-drain-request.ts): the one way to reach a child
+	 * on every platform. Without it the request is the POSIX signal alone.
+	 */
+	constructor(
+		child: ChildProcess,
+		shuttingDown: () => boolean,
+		beginStopping: () => void = () => {},
+		relay?: { readonly file: string; readonly sender: HostStopSender },
+	) {
 		this.child = child;
 		this.shuttingDown = shuttingDown;
 		this.beginStopping = beginStopping;
+		this.relay = relay;
 	}
 
 	get active(): boolean {
@@ -56,14 +70,36 @@ export class SupervisorDrain {
 		if (this.graceTimer) clearTimeout(this.graceTimer);
 	}
 
+	/**
+	 * The signal-free drain request (#3653): armed BEFORE it is advertised, so an asker that finds the
+	 * marker never writes into a generation that is not yet reading. A marker that cannot be written
+	 * only leaves this generation reachable by the POSIX signal, as before.
+	 */
+	async acceptRequests(generation: HostGenerationPaths): Promise<() => void> {
+		const stop = watchDrainRequest(generation.drainRequestFile, (request) => {
+			supervisorLog(`drain requested (${request.reason})`);
+			this.drain();
+		});
+		await writeDrainWatch(generation.drainWatchFile, { pid: process.pid }).catch((cause) => {
+			supervisorLog(`cannot advertise the drain request: ${errorMessage(cause)}`);
+		});
+		return stop;
+	}
+
 	private requestChildDrain(): void {
-		const { child } = this;
-		if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-			try {
-				process.kill(child.pid, "SIGUSR1");
-			} catch (cause) {
-				supervisorLog(`could not ask the host to drain: ${errorMessage(cause)}`);
-			}
+		const { child, relay } = this;
+		if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+		if (relay) {
+			void writeDrainRequest(relay.file, { sender: relay.sender, reason: "supervisor_drain" }).catch((cause) => {
+				supervisorLog(`could not relay the drain to the host: ${errorMessage(cause)}`);
+			});
+		}
+		// win32 has no SIGUSR1; on POSIX it stays the immediate wake ahead of the next poll of the relay.
+		if (process.platform === "win32") return;
+		try {
+			process.kill(child.pid, "SIGUSR1");
+		} catch (cause) {
+			supervisorLog(`could not ask the host to drain: ${errorMessage(cause)}`);
 		}
 	}
 }
@@ -79,8 +115,9 @@ export function drainOnPublicSocketLoss(
 	settled: () => boolean,
 	drain: SupervisorDrain,
 	onReplaced: () => void,
+	pointer?: SupersessionPointer,
 ): () => void {
-	return watchForSupersession({ path, identity, settled }, (loss) => {
+	return watchForSupersession({ path, identity, settled, ...(pointer && { pointer }) }, (loss) => {
 		// A REPLACED entry names a live replacer: the registration and settings this generation
 		// would release on its way out belong to that replacer now (#2536).
 		if (loss === "replaced") onReplaced();

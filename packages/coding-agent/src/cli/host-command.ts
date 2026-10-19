@@ -51,7 +51,7 @@ const USAGE = `usage: ${APP_NAME} host <ensure|status|stop|handoff|shard-path|gc
 
   ensure      [--launch-spec <file>] [--policy upgrade|fallback|never] [--socket <path>]
   status      [--include-workers] [--all] [--socket <path>]   (--all: every endpoint, ignores --socket)
-  stop        [--drain] [--force] [--socket <path>]
+  stop        [--drain [--instance <id>] [--wait-ms <n>]] [--force] [--socket <path>]
   handoff     [--launch-spec <file>] [--socket <path>]
               [--when idle --operation <id> --if-instance <id> --if-generation <n> --target-build <sha256:...>]
               (--when idle: the running host hands over to THIS runtime at its next safe idle point)
@@ -70,6 +70,10 @@ interface ParsedHostArgs {
 	readonly all: boolean;
 	readonly drain: boolean;
 	readonly force: boolean;
+	/** `stop --drain`: the generation to drain, by instance id. */
+	readonly instanceId?: string;
+	/** `stop --drain`: how long to wait for the drained generation to exit. */
+	readonly waitMs?: number;
 	readonly json: boolean;
 	readonly kind?: ShardKind;
 	readonly owner?: string;
@@ -112,7 +116,14 @@ async function hostRequest(parsed: ParsedHostArgs): Promise<HostRequest> {
 		case "status":
 			return { action: "status", target, includeWorkers: parsed.includeWorkers, all: parsed.all };
 		case "stop":
-			return { action: "stop", target, drain: parsed.drain, force: parsed.force };
+			return {
+				action: "stop",
+				target,
+				drain: parsed.drain,
+				force: parsed.force,
+				...(parsed.instanceId !== undefined && { instanceId: parsed.instanceId }),
+				...(parsed.waitMs !== undefined && { waitMs: parsed.waitMs }),
+			};
 		case "handoff":
 			return {
 				action: "handoff",
@@ -156,6 +167,8 @@ export function parseHostArgs(args: readonly string[]): ParsedHostArgs | string 
 	let all = false;
 	let drain = false;
 	let force = false;
+	let instanceId: string | undefined;
+	let waitMs: string | undefined;
 	let json = false;
 	let kind: ShardKind | undefined;
 	let owner: string | undefined;
@@ -186,6 +199,12 @@ export function parseHostArgs(args: readonly string[]): ParsedHostArgs | string 
 		} else if (subcommand === "handoff" && value !== undefined && HANDOVER_FLAGS.has(flag ?? "")) {
 			handover[flag ?? ""] = value;
 			index++;
+		} else if (flag === "--instance" && subcommand === "stop" && value !== undefined) {
+			instanceId = value;
+			index++;
+		} else if (flag === "--wait-ms" && subcommand === "stop" && value !== undefined) {
+			waitMs = value;
+			index++;
 		} else if (flag === "--drain") {
 			drain = true;
 		} else if (flag === "--force") {
@@ -206,6 +225,13 @@ export function parseHostArgs(args: readonly string[]): ParsedHostArgs | string 
 	if (subcommand === "shard-path" && (kind === undefined || owner === undefined)) {
 		return `Error: "${APP_NAME} host shard-path" needs --kind <p|i> and --owner <id>.`;
 	}
+	if ((instanceId !== undefined || waitMs !== undefined) && !drain) {
+		return `Error: "${APP_NAME} host stop" takes --instance and --wait-ms only with --drain.`;
+	}
+	const parsedWaitMs = waitMs === undefined ? undefined : Number(waitMs);
+	if (parsedWaitMs !== undefined && (!Number.isSafeInteger(parsedWaitMs) || parsedWaitMs <= 0)) {
+		return `Error: "${APP_NAME} host stop --wait-ms" needs a positive whole number of milliseconds.`;
+	}
 	const terms = Object.keys(handover).length === 0 ? undefined : handoverTerms(handover);
 	if (typeof terms === "string") return terms;
 	return {
@@ -217,6 +243,8 @@ export function parseHostArgs(args: readonly string[]): ParsedHostArgs | string 
 		all,
 		drain,
 		force,
+		...(instanceId !== undefined && { instanceId }),
+		...(parsedWaitMs !== undefined && { waitMs: parsedWaitMs }),
 		json,
 		...(kind !== undefined && { kind }),
 		...(owner !== undefined && { owner }),

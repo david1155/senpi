@@ -483,8 +483,10 @@ are what this decision encodes; the other two are what a client must not undo el
   signal a generation (an ensure, `host stop`, a handoff abandoning its successor, the generation's own supervisor)
   first writes `generations/<instanceId>/stop-intent.json` `{ sender, targetPid, reason, signal, at }` into THAT
   generation's directory, because the target cannot know who is about to stop it; nothing ever reads or removes
-  another generation's intent, and a drain writes none. Caller-lifetime registration is the other
-  explicit cross-writer: only `owner.json`, under the endpoint lock and attach hold described above.
+  another generation's intent, and a drain writes none. The DRAIN REQUEST is the second sanctioned cross-writer:
+  `host stop --drain` writes `generations/<instanceId>/drain-request.json` into the generation it asks (see
+  [Asking a named generation to drain](#asking-a-named-generation-to-drain)). Caller-lifetime registration is the
+  other explicit cross-writer: only `owner.json`, under the endpoint lock and attach hold described above.
 - **I4 - machine-driven work is invisible by default.** A session opened with `kind: "worker"` is omitted from
   `list_sessions` unless the caller passes `include_workers: true`, its `context` is published on that listing only,
   and its `session_closed`/`session_parked` records reach only the connections attached to it. A client that never
@@ -521,9 +523,9 @@ Two guards decide whether a handoff is attempted at all, and both fail closed:
   signals a stranger (I1): it refuses while that host holds a session, and replaces an idle one without
   a signal unless a flat pre-layout-2 record proves it (see "Daemon state directory (layout 2)").
 
-On win32 a named pipe can be neither renamed nor drained: `handoffHost` refuses with `upgrade_unsupported`
-and `decideHostAction` never yields `handoff` there. Upgrades apply after `stopHost({ drain: true })` or an
-idle exit.
+On win32 a named pipe cannot be renamed: `handoffHost` refuses with `upgrade_unsupported` and
+`decideHostAction` never yields `handoff` there. Upgrades apply after `stopHost({ drain: true })` - which
+reaches a win32 generation through its drain request, not a signal - or an idle exit.
 
 `ensureHost` performs a handoff only when asked: `upgrade: "if-engine-differs"` (default `"never"`) makes it
 run `decideHostAction` under policy `upgrade` with the launch profile its own `hostArgs` describe. A refused
@@ -547,6 +549,39 @@ proves only that nobody is serving the name, so it has to be seen on several con
 counts, and a check that cannot answer resets the count rather than adding to it. Either way the outcome is
 the same drain: an unlinked socket name can never accept a connection again, so the generation behind it is
 unreachable no matter why the name went away.
+
+An endpoint with no file identity - a win32 named pipe has no inode to compare - is checked on two POSITIVE
+observations instead: the daemon pointer names another instance, and the public endpoint answers
+`get_protocol_info` (an `observe` read, which never counts as activity) as that same instance. They must agree
+on three consecutive checks; a missing pointer, an unanswered probe, an answer as this generation or as a third
+instance each reset the count. Such an endpoint is never judged absent, and nothing is removed or reclaimed on
+any observation: a confirmed loss only starts the same drain.
+
+#### Asking a named generation to drain
+
+`stopHost({ socket, agentDir, drain: true, instanceId?, waitMs? })` (CLI: `host stop --drain [--instance <id>]
+[--wait-ms <n>]`) asks ONE generation to drain: the one the pointer names, or the one `instanceId` names - how a
+client reaches a superseded generation that still holds its sessions' path claims. The target must be proven
+first, exactly as for any signal: its `generations/<instanceId>/host.pid` names a live process by pid and start
+time, about this endpoint; an unproven or unknown generation is refused `unknown_owner` and sent nothing.
+
+The request needs no signal and is the same on every platform:
+
+1. A supervisor reads drain requests once it is serving and says so in `generations/<instanceId>/drain-watch.json`
+   `{ pid, at }`. The asker uses the request only when that marker names the very pid it just proved.
+2. The asker writes `generations/<instanceId>/drain-request.json` `{ sender, reason, at, nonce }` by rename.
+3. The supervisor polls that file once a second; each new `nonce` is one drain request. It runs the drain
+   described under [Generation handoff](#generation-handoff-handoffhost-probehost-stophost): stop admitting, park each session as it
+   settles, release its claims, exit once nothing is attached. It relays the drain to its host child through
+   `generations/<instanceId>/host-drain-request.json`, which the child polls (on POSIX SIGUSR1 still follows as
+   an immediate wake).
+
+A generation without the marker - one from before the request existed - is drained by SIGUSR1 as before, and only
+on POSIX, when the endpoint advertises `generation_handoff` AND answers as the named instance; otherwise the
+answer is `drain_unsupported`. The answer is `{ action: "drained", pid, instanceId }`; with `waitMs` it also
+carries `exited`, `true` once the generation's process is gone (or its pid names another process) within the
+bound, `false` otherwise - an identity that cannot be read is not an exit. A client that did not wait learns the
+same from `host status --json`: the drained generation leaves `generations` when it exits.
 
 `stopHost({ socket, agentDir, drain?, force? })` ends a generation: `drain: true` is always permitted (it
 ends no work, it only stops the host from taking new work), while a hard stop requires a host that reports
@@ -727,7 +762,7 @@ daemon the same way instead of each re-implementing the decision:
 ```
 senpi host ensure     [--json] [--launch-spec <file>] [--policy upgrade|fallback|never] [--socket <path>]
 senpi host status     [--json] [--include-workers] [--all] [--socket <path>]
-senpi host stop       [--json] [--drain] [--force] [--socket <path>]
+senpi host stop       [--json] [--drain [--instance <id>] [--wait-ms <n>]] [--force] [--socket <path>]
 senpi host handoff    [--json] [--launch-spec <file>] [--socket <path>]
                       [--when idle --operation <id> --if-instance <id> --if-generation <n> --target-build <id>]
 senpi host shard-path --kind <p|i> --owner <id> [--root <dir>] [--json]
@@ -894,8 +929,10 @@ which prints the bare socket path).
   one on the same evidence as a host's.
 - `stop` is the I1 carve-out: a plain stop needs a validated pidfile AND `foreign_attached +
   foreign_retained == 0`, or it refuses with exit 3 and prints the counts it refused on; `--force`
-  overrides after printing the same counts; `--drain` (SIGUSR1) is always permitted, because it ends no
-  work.
+  overrides after printing the same counts; `--drain` is always permitted, because it ends no work. It
+  asks through the generation's drain request (SIGUSR1 only for a generation from before it), `--instance <id>`
+  names a generation other than the current one, and `--wait-ms <n>` waits for it to exit and adds `exited` to
+  the answer; both need `--drain`.
 - `handoff` forces a generation handoff from THIS binary. A host that cannot drain and a platform that
   cannot rename answer alike: exit 3 `{ reason: "upgrade_unsupported", detail }`. The handoff runs inside the
   endpoint's ensure lock (the one `ensure` and `gc` take), so an `ensure` arriving while the successor comes up

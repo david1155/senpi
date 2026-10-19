@@ -166,6 +166,7 @@ export async function runHostSupervisor(launch: SupervisorLaunch): Promise<void>
 		child,
 		() => state.shuttingDown,
 		() => admission.stop(),
+		{ file: generation.childDrainRequestFile, sender: supervisorSender(instanceId) },
 	);
 	const server = createPublicProxy({
 		internalSocket,
@@ -246,8 +247,10 @@ export async function runHostSupervisor(launch: SupervisorLaunch): Promise<void>
 				() => {
 					state.endpointReplaced = true;
 				},
+				{ file: paths.pointerFile, instanceId },
 			),
 		);
+		watchers.push(await drain.acceptRequests(generation));
 	} catch (cause) {
 		await shutdown(`startup failed: ${errorMessage(cause)}`, 1);
 	}

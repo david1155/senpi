@@ -21,6 +21,7 @@ import { ClientOccupancy } from "./host-client-occupancy.ts";
 import { HostCoreGate, type HostCoreHooks } from "./host-core-gate.ts";
 import { createHostDaemonPaths } from "./host-daemon-paths.ts";
 import { GENERATION_HANDOFF_CAPABILITY } from "./host-decision.ts";
+import { hostChildDrainRequestFile, watchDrainRequest } from "./host-drain-request.ts";
 import { reopenHandoverParkedSessions } from "./host-handover-reopen.ts";
 import { performIdleHandover } from "./host-handover-wire.ts";
 import { EXPECTED_RUNTIME_BUILD_ID_ENV } from "./host-idle-handover.ts";
@@ -531,6 +532,9 @@ async function runSocketHost(options: MultiSessionHostOptions, socketPath: strin
 			: socketEntryReplaced(supervisorPublicSocketPath, supervisorPublicIdentity);
 	registerShutdownSignals(shutdown);
 	if (process.platform !== "win32") process.on("SIGUSR1", drainForHandoff);
+	// The supervisor's signal-free relay, the drain channel every platform shares (#3653).
+	const drainRequestFile = hostChildDrainRequestFile();
+	if (drainRequestFile !== undefined) watchDrainRequest(drainRequestFile, drainForHandoff);
 	// Arm before listen: a supervisor death during the listen transition must
 	// still close the child and clean its private endpoint.
 	const watchdog =

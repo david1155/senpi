@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- `senpi host stop --drain` reaches a generation without signals on every platform, including win32, and `--instance <id>` drains a named (superseded) generation with `--wait-ms <n>` reporting whether it `exited`; a superseded win32 generation now drains itself once the pointer and the endpoint both name its successor ([#3653](https://github.com/code-yeongyu/senpi/issues/3653)).
 - `get_available_models` reports each model's resolved `serviceTier` and `upstreamModelId`, including a `-fast` alias's pairing declared only in `models.json` or by an extension provider. Clients that verify a child opened on the base model of a requested `-fast` alias no longer refuse it as a substitution ([#3666](https://github.com/code-yeongyu/senpi/issues/3666)).
 
 - Esc or the turn deadline now also release an `agent_before_settle` (or other `agent_end` boundary) handler that never settles: an abort that joined the open boundary used to return before the grace-and-release ran, so the session stayed streaming ([#3650](https://github.com/code-yeongyu/senpi/issues/3650)).

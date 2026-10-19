@@ -211,8 +211,8 @@ export function waitForChildExit(child: ChildProcess, timeoutMs: number): Promis
 /**
  * External stop (ensureHost replacement, tests, QA) must clean up like idle exit; SIGUSR1 is the
  * gentler request - finish what you are doing and leave - that a generation handoff and
- * `stopHost({ drain: true })` both send. It exists on POSIX only, which is one reason win32 hosts
- * are attach-only: no signal there means anything but "terminate".
+ * `stopHost({ drain: true })` both send to a host from before the drain request. It exists on POSIX
+ * only: on win32 the drain arrives as a drain request (host-drain-request.ts), never as a signal.
  */
 export function registerSupervisorSignals(
 	shutdown: (reason: string, exitCode: number) => Promise<never>,

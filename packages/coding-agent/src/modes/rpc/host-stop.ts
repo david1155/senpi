@@ -21,16 +21,19 @@
 
 import { createHostDaemonPaths, generationPaths } from "./host-daemon-paths.ts";
 import { provenOwner, readHostRegistration, releaseGeneration } from "./host-daemon-registration.ts";
-import { GENERATION_HANDOFF_CAPABILITY } from "./host-decision.ts";
-import { provenLegacyOwner } from "./host-legacy.ts";
 import { probeProtocolInfo, probeSessionCount } from "./host-probe.ts";
+import { type DrainHostResult, drainHost } from "./host-stop-drain.ts";
 import { writeStopIntent } from "./host-stop-intent.ts";
 
 export interface StopHostOptions {
 	readonly socket: string;
 	readonly agentDir?: string;
-	/** Ask the host to finish its work and exit (SIGUSR1) instead of terminating it. */
+	/** Ask the host to finish its work and exit instead of terminating it (host-stop-drain.ts). */
 	readonly drain?: boolean;
+	/** With `drain`: the generation to ask, by instance id, instead of the one the pointer names. */
+	readonly instanceId?: string;
+	/** With `drain`: wait up to this long for the generation to exit, and report `exited`. */
+	readonly waitMs?: number;
 	/** Terminate even when the host still reports open sessions. */
 	readonly force?: boolean;
 	readonly timeoutMs?: number;
@@ -39,7 +42,8 @@ export interface StopHostOptions {
 }
 
 export type StopHostResult =
-	| { readonly action: "drained" | "stopped"; readonly pid: number }
+	| DrainHostResult
+	| { readonly action: "stopped"; readonly pid: number }
 	| { readonly action: "refuse"; readonly reason: "unknown_owner" | "drain_unsupported" | "sessions_live" };
 
 /**
@@ -52,21 +56,16 @@ export async function stopHost(options: StopHostOptions): Promise<StopHostResult
 		socket: options.socket,
 		...(options.agentDir ? { agentDir: options.agentDir } : {}),
 	});
+	if (options.drain === true) {
+		return drainHost(paths, {
+			socket: options.socket,
+			...(options.instanceId !== undefined && { instanceId: options.instanceId }),
+			...(options.waitMs !== undefined && { waitMs: options.waitMs }),
+			...(options.timeoutMs !== undefined && { timeoutMs: options.timeoutMs }),
+		});
+	}
 	const registered = await readHostRegistration(paths);
 	const owner = await provenOwner(registered, options.socket);
-	if (options.drain === true) {
-		const pid = owner?.pid ?? (await provenLegacyOwner(paths, options.socket))?.pid;
-		if (pid === undefined) return { action: "refuse", reason: "unknown_owner" };
-		const host = await probeProtocolInfo(options.socket, options.timeoutMs ?? 10_000);
-		// SIGUSR1 terminates a process that installed no handler for it: a host that does not
-		// advertise the drain is refused rather than killed by the request to shut down gently.
-		if (!host?.capabilities.includes(GENERATION_HANDOFF_CAPABILITY) || process.platform === "win32") {
-			return { action: "refuse", reason: "drain_unsupported" };
-		}
-		// A generation that left on its own between the proof and the signal is already drained.
-		signalGeneration(pid, "SIGUSR1");
-		return { action: "drained", pid };
-	}
 	if (!owner) return { action: "refuse", reason: "unknown_owner" };
 	const host = await probeProtocolInfo(options.socket, options.timeoutMs ?? 10_000);
 	// A hard stop ends whatever the host is doing, including work that belongs to other clients:
