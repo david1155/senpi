@@ -8,6 +8,8 @@
 
 ### Changed
 
+- The bundled model catalog is refreshed from models.dev and the providers' model listings (`alibaba-token-plan`, `amazon-bedrock`, `minimax`, `minimax-cn`, `moonshotai-cn`, `opengateway`, `openrouter`, `qwen-token-plan`, `together`, `venice`, `vercel-ai-gateway`, `xai`).
+
 ### Fixed
 
 ### Removed
